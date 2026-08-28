@@ -188,14 +188,16 @@ func TestAffiliateRepository_AccrueQuota_ReusesOuterTransaction(t *testing.T) {
 	bound, err := repo.BindInviter(txCtx, invitee.ID, inviter.ID)
 	require.NoError(t, err)
 	require.True(t, bound, "invitee must bind to inviter")
+	adminCodeID := insertHistoricalRedeemCode(t, txCtx, client, invitee.ID, "admin_balance", 17.5, time.Now())
 
 	applied, err := repo.AccrueQuota(txCtx, service.AffiliateAccrualInput{
 		InviterID:     inviter.ID,
 		InviteeUserID: invitee.ID,
 		Amount:        3.5,
 		Source: service.AffiliateRebateSource{
-			Type:       service.AffiliateRebateSourceAdminRecharge,
-			BaseAmount: 17.5,
+			Type:         service.AffiliateRebateSourceAdminRecharge,
+			BaseAmount:   17.5,
+			RedeemCodeID: &adminCodeID,
 		},
 	})
 	require.NoError(t, err)
@@ -270,6 +272,15 @@ RETURNING id`, shortRedeemCode, invitee.ID)
 			RedeemCodeID: &redeemCodeID,
 		},
 	}
+	wrongInviteeInput := input
+	wrongInviteeInput.InviteeUserID = inviter.ID
+	_, err = repo.AccrueQuota(txCtx, wrongInviteeInput)
+	require.ErrorIs(t, err, service.ErrAffiliateRebateSource)
+	wrongTypeInput := input
+	wrongTypeInput.Source.Type = service.AffiliateRebateSourceAdminRecharge
+	_, err = repo.AccrueQuota(txCtx, wrongTypeInput)
+	require.ErrorIs(t, err, service.ErrAffiliateRebateSource)
+
 	first, err := repo.AccrueQuota(txCtx, input)
 	require.NoError(t, err)
 	require.InDelta(t, 10, first, 1e-9)
@@ -283,6 +294,20 @@ RETURNING id`, shortRedeemCode, invitee.ID)
 	ledgerCount := querySingleInt(t, txCtx, client,
 		"SELECT COUNT(*) FROM user_affiliate_ledger WHERE source_redeem_code_id = $1", redeemCodeID)
 	require.Equal(t, 1, ledgerCount)
+	for range 2 {
+		additionalCodeID := insertHistoricalRedeemCode(t, txCtx, client, invitee.ID, "balance", 50, time.Now())
+		_, err = repo.AccrueQuota(txCtx, service.AffiliateAccrualInput{
+			InviterID:     inviter.ID,
+			InviteeUserID: invitee.ID,
+			Amount:        10,
+			Source: service.AffiliateRebateSource{
+				Type:         service.AffiliateRebateSourceBalanceRedeem,
+				BaseAmount:   50,
+				RedeemCodeID: &additionalCodeID,
+			},
+		})
+		require.NoError(t, err)
+	}
 
 	items, total, err := repo.ListAffiliateRebateRecords(txCtx, service.AffiliateRecordFilter{
 		SourceType: string(service.AffiliateRebateSourceBalanceRedeem),
@@ -290,14 +315,44 @@ RETURNING id`, shortRedeemCode, invitee.ID)
 		PageSize:   20,
 	})
 	require.NoError(t, err)
-	require.Equal(t, int64(1), total)
-	require.Len(t, items, 1)
-	require.Equal(t, string(service.AffiliateRebateSourceBalanceRedeem), items[0].SourceType)
-	require.Equal(t, redeemCodeID, *items[0].RedeemCodeID)
-	require.Equal(t, "****", *items[0].RedeemCodeMasked)
-	require.NotContains(t, *items[0].RedeemCodeMasked, shortRedeemCode)
-	require.InDelta(t, 50, *items[0].BaseAmount, 1e-9)
-	require.InDelta(t, 10, items[0].RebateAmount, 1e-9)
+	require.Equal(t, int64(3), total)
+	require.Len(t, items, 3)
+	var originalRecord *service.AffiliateRebateRecord
+	for i := range items {
+		if items[i].RedeemCodeID != nil && *items[i].RedeemCodeID == redeemCodeID {
+			originalRecord = &items[i]
+			break
+		}
+	}
+	require.NotNil(t, originalRecord)
+	require.Equal(t, string(service.AffiliateRebateSourceBalanceRedeem), originalRecord.SourceType)
+	require.Equal(t, "****", *originalRecord.RedeemCodeMasked)
+	require.NotContains(t, *originalRecord.RedeemCodeMasked, shortRedeemCode)
+	require.InDelta(t, 50, *originalRecord.BaseAmount, 1e-9)
+	require.InDelta(t, 10, originalRecord.RebateAmount, 1e-9)
+
+	pageFilter := service.AffiliateRecordFilter{
+		SourceType: string(service.AffiliateRebateSourceBalanceRedeem),
+		Page:       1,
+		PageSize:   2,
+		SortBy:     "source",
+	}
+	firstPage, _, err := repo.ListAffiliateRebateRecords(txCtx, pageFilter)
+	require.NoError(t, err)
+	pageFilter.Page = 2
+	secondPage, _, err := repo.ListAffiliateRebateRecords(txCtx, pageFilter)
+	require.NoError(t, err)
+	require.Len(t, firstPage, 2)
+	require.Len(t, secondPage, 1)
+	seenLedgerIDs := map[int64]struct{}{}
+	for _, item := range append(firstPage, secondPage...) {
+		seenLedgerIDs[item.LedgerID] = struct{}{}
+	}
+	require.Len(t, seenLedgerIDs, 3, "来源字段并列时跨页记录不能重复或遗漏")
+	pageFilter.Page = 1
+	repeatedFirstPage, _, err := repo.ListAffiliateRebateRecords(txCtx, pageFilter)
+	require.NoError(t, err)
+	require.Equal(t, []int64{firstPage[0].LedgerID, firstPage[1].LedgerID}, []int64{repeatedFirstPage[0].LedgerID, repeatedFirstPage[1].LedgerID})
 }
 
 func TestAffiliateRepository_AccrueQuota_ConcurrentSameRedeemSourceIsIdempotent(t *testing.T) {
@@ -396,23 +451,31 @@ func TestAffiliateRepository_AccrueQuota_TruncatesAtPerInviteeCap(t *testing.T) 
 	_, err = repo.EnsureUserAffiliate(txCtx, invitee.ID)
 	require.NoError(t, err)
 
-	input := service.AffiliateAccrualInput{
-		InviterID:     inviter.ID,
-		InviteeUserID: invitee.ID,
-		Amount:        4.12345678,
-		PerInviteeCap: 5.000000009,
-		Source: service.AffiliateRebateSource{
-			Type:       service.AffiliateRebateSourceAdminRecharge,
-			BaseAmount: 20,
-		},
+	adminCodeIDs := []int64{
+		insertHistoricalRedeemCode(t, txCtx, client, invitee.ID, "admin_balance", 20, time.Now()),
+		insertHistoricalRedeemCode(t, txCtx, client, invitee.ID, "admin_balance", 20, time.Now()),
+		insertHistoricalRedeemCode(t, txCtx, client, invitee.ID, "admin_balance", 20, time.Now()),
 	}
-	first, err := repo.AccrueQuota(txCtx, input)
+	inputForCode := func(codeID int64) service.AffiliateAccrualInput {
+		return service.AffiliateAccrualInput{
+			InviterID:     inviter.ID,
+			InviteeUserID: invitee.ID,
+			Amount:        4.12345678,
+			PerInviteeCap: 5.000000009,
+			Source: service.AffiliateRebateSource{
+				Type:         service.AffiliateRebateSourceAdminRecharge,
+				BaseAmount:   20,
+				RedeemCodeID: &codeID,
+			},
+		}
+	}
+	first, err := repo.AccrueQuota(txCtx, inputForCode(adminCodeIDs[0]))
 	require.NoError(t, err)
 	require.InDelta(t, 4.12345678, first, 1e-9)
-	second, err := repo.AccrueQuota(txCtx, input)
+	second, err := repo.AccrueQuota(txCtx, inputForCode(adminCodeIDs[1]))
 	require.NoError(t, err)
 	require.InDelta(t, 0.87654322, second, 1e-9)
-	third, err := repo.AccrueQuota(txCtx, input)
+	third, err := repo.AccrueQuota(txCtx, inputForCode(adminCodeIDs[2]))
 	require.NoError(t, err)
 	require.Zero(t, third)
 
@@ -441,6 +504,10 @@ func TestAffiliateRepository_AccrueQuota_ConcurrentRequestsRespectPerInviteeCap(
 	require.NoError(t, err)
 	_, err = repo.EnsureUserAffiliate(ctx, invitee.ID)
 	require.NoError(t, err)
+	adminCodeIDs := []int64{
+		insertHistoricalRedeemCode(t, ctx, integrationEntClient, invitee.ID, "admin_balance", 20, time.Now()),
+		insertHistoricalRedeemCode(t, ctx, integrationEntClient, invitee.ID, "admin_balance", 20, time.Now()),
+	}
 
 	type result struct {
 		amount float64
@@ -448,17 +515,19 @@ func TestAffiliateRepository_AccrueQuota_ConcurrentRequestsRespectPerInviteeCap(
 	}
 	start := make(chan struct{})
 	results := make(chan result, 2)
-	for range 2 {
+	for i := range 2 {
 		go func() {
 			<-start
+			adminCodeID := adminCodeIDs[i]
 			amount, accrueErr := repo.AccrueQuota(ctx, service.AffiliateAccrualInput{
 				InviterID:     inviter.ID,
 				InviteeUserID: invitee.ID,
 				Amount:        4,
 				PerInviteeCap: 5,
 				Source: service.AffiliateRebateSource{
-					Type:       service.AffiliateRebateSourceAdminRecharge,
-					BaseAmount: 20,
+					Type:         service.AffiliateRebateSourceAdminRecharge,
+					BaseAmount:   20,
+					RedeemCodeID: &adminCodeID,
 				},
 			})
 			results <- result{amount: amount, err: accrueErr}
@@ -567,7 +636,151 @@ WHERE rc.used_by = $1 AND rc.type = 'admin_balance'`, invitee.ID)
 	require.Equal(t, 1, ledgerCount)
 }
 
-func TestAffiliateRebateSourcesMigration_ConservativeBackfillAndRepeatExecution(t *testing.T) {
+func TestRedeemService_BalanceAndAffiliateRebateShareTransaction(t *testing.T) {
+	ctx := context.Background()
+	userRepo := NewUserRepository(integrationEntClient, integrationDB)
+	redeemRepo := NewRedeemCodeRepository(integrationEntClient)
+	affiliateRepo := NewAffiliateRepository(integrationEntClient, integrationDB)
+	settingRepo := NewSettingRepository(integrationEntClient)
+	settingKeys := []string{
+		service.SettingKeyAffiliateEnabled,
+		service.SettingKeyAffiliateRebateRate,
+		service.SettingKeyAffiliateRebateFreezeHours,
+		service.SettingKeyAffiliateRebateDurationDays,
+		service.SettingKeyAffiliateRebatePerInviteeCap,
+	}
+	previousSettings, err := settingRepo.GetMultiple(ctx, settingKeys)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		for _, key := range settingKeys {
+			if value, ok := previousSettings[key]; ok {
+				require.NoError(t, settingRepo.Set(ctx, key, value))
+				continue
+			}
+			require.NoError(t, settingRepo.Delete(ctx, key))
+		}
+	})
+	require.NoError(t, settingRepo.SetMultiple(ctx, map[string]string{
+		service.SettingKeyAffiliateEnabled:             "true",
+		service.SettingKeyAffiliateRebateRate:          "20",
+		service.SettingKeyAffiliateRebateFreezeHours:   "0",
+		service.SettingKeyAffiliateRebateDurationDays:  "0",
+		service.SettingKeyAffiliateRebatePerInviteeCap: "0",
+	}))
+	settingService := service.NewSettingService(settingRepo, nil)
+
+	inviter := mustCreateUser(t, integrationEntClient, &service.User{
+		Email:        fmt.Sprintf("redeem-transaction-inviter-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+		Role:         service.RoleUser,
+		Status:       service.StatusActive,
+	})
+	invitee := mustCreateUser(t, integrationEntClient, &service.User{
+		Email:        fmt.Sprintf("redeem-transaction-invitee-%d@example.com", time.Now().UnixNano()+1),
+		PasswordHash: "hash",
+		Role:         service.RoleUser,
+		Status:       service.StatusActive,
+		Balance:      10,
+	})
+	_, err = affiliateRepo.EnsureUserAffiliate(ctx, inviter.ID)
+	require.NoError(t, err)
+	_, err = affiliateRepo.EnsureUserAffiliate(ctx, invitee.ID)
+	require.NoError(t, err)
+	bound, err := affiliateRepo.BindInviter(ctx, invitee.ID, inviter.ID)
+	require.NoError(t, err)
+	require.True(t, bound)
+
+	codeSequence := 0
+	createBalanceCode := func(value float64) *service.RedeemCode {
+		codeSequence++
+		code := &service.RedeemCode{
+			Code:   fmt.Sprintf("REALREDEEM%d-%d", time.Now().UnixNano(), codeSequence),
+			Type:   service.RedeemTypeBalance,
+			Value:  value,
+			Status: service.StatusUnused,
+		}
+		require.NoError(t, redeemRepo.Create(ctx, code))
+		require.Positive(t, code.ID)
+		return code
+	}
+	ledgerCountForCode := func(codeID int64) int {
+		return querySingleInt(t, ctx, integrationEntClient,
+			"SELECT COUNT(*) FROM user_affiliate_ledger WHERE source_redeem_code_id = $1", codeID)
+	}
+
+	affiliateService := service.NewAffiliateService(affiliateRepo, settingService, nil, nil)
+	redeemService := service.NewRedeemService(redeemRepo, userRepo, nil, nil, nil, integrationEntClient, nil, affiliateService)
+
+	successCode := createBalanceCode(5)
+	redeemed, err := redeemService.Redeem(ctx, invitee.ID, successCode.Code)
+	require.NoError(t, err)
+	require.Equal(t, service.StatusUsed, redeemed.Status)
+	require.InDelta(t, 15, querySingleFloat(t, ctx, integrationEntClient,
+		"SELECT balance::double precision FROM users WHERE id = $1", invitee.ID), 1e-9)
+	require.InDelta(t, 1, querySingleFloat(t, ctx, integrationEntClient,
+		"SELECT aff_quota::double precision FROM user_affiliates WHERE user_id = $1", inviter.ID), 1e-9)
+	require.Equal(t, 1, ledgerCountForCode(successCode.ID))
+
+	failingAffiliateService := service.NewAffiliateService(&failingAccrueAffiliateRepository{
+		AffiliateRepository: affiliateRepo,
+		err:                 errors.New("forced redeem affiliate failure"),
+	}, settingService, nil, nil)
+	failingRedeemService := service.NewRedeemService(redeemRepo, userRepo, nil, nil, nil, integrationEntClient, nil, failingAffiliateService)
+	failureCode := createBalanceCode(7)
+	redeemed, err = failingRedeemService.Redeem(ctx, invitee.ID, failureCode.Code)
+	require.Nil(t, redeemed)
+	require.ErrorContains(t, err, "forced redeem affiliate failure")
+	reloadedFailureCode, err := redeemRepo.GetByID(ctx, failureCode.ID)
+	require.NoError(t, err)
+	require.Equal(t, service.StatusUnused, reloadedFailureCode.Status)
+	require.Nil(t, reloadedFailureCode.UsedBy)
+	require.InDelta(t, 15, querySingleFloat(t, ctx, integrationEntClient,
+		"SELECT balance::double precision FROM users WHERE id = $1", invitee.ID), 1e-9)
+	require.InDelta(t, 1, querySingleFloat(t, ctx, integrationEntClient,
+		"SELECT aff_quota::double precision FROM user_affiliates WHERE user_id = $1", inviter.ID), 1e-9)
+	require.Zero(t, ledgerCountForCode(failureCode.ID))
+
+	skipCode := createBalanceCode(3)
+	redeemed, err = redeemService.Redeem(service.ContextSkipRedeemAffiliate(ctx), invitee.ID, skipCode.Code)
+	require.NoError(t, err)
+	require.Equal(t, service.StatusUsed, redeemed.Status)
+	require.InDelta(t, 18, querySingleFloat(t, ctx, integrationEntClient,
+		"SELECT balance::double precision FROM users WHERE id = $1", invitee.ID), 1e-9)
+	require.InDelta(t, 1, querySingleFloat(t, ctx, integrationEntClient,
+		"SELECT aff_quota::double precision FROM user_affiliates WHERE user_id = $1", inviter.ID), 1e-9)
+	require.Zero(t, ledgerCountForCode(skipCode.ID))
+
+	concurrentCode := createBalanceCode(4)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			_, redeemErr := redeemService.Redeem(ctx, invitee.ID, concurrentCode.Code)
+			results <- redeemErr
+		}()
+	}
+	close(start)
+	successCount := 0
+	failureCount := 0
+	for range 2 {
+		if redeemErr := <-results; redeemErr == nil {
+			successCount++
+		} else {
+			failureCount++
+			require.ErrorIs(t, redeemErr, service.ErrRedeemCodeUsed)
+		}
+	}
+	require.Equal(t, 1, successCount)
+	require.Equal(t, 1, failureCount)
+	require.InDelta(t, 22, querySingleFloat(t, ctx, integrationEntClient,
+		"SELECT balance::double precision FROM users WHERE id = $1", invitee.ID), 1e-9)
+	require.InDelta(t, 1.8, querySingleFloat(t, ctx, integrationEntClient,
+		"SELECT aff_quota::double precision FROM user_affiliates WHERE user_id = $1", inviter.ID), 1e-9)
+	require.Equal(t, 1, ledgerCountForCode(concurrentCode.ID))
+}
+
+func TestAffiliateRebateSourcesMigration_DoesNotGuessHistoryAndRepairsSupersededDraft(t *testing.T) {
 	ctx := context.Background()
 	tx := testEntTx(t)
 	txCtx := dbent.NewTxContext(ctx, tx)
@@ -610,10 +823,10 @@ func TestAffiliateRebateSourcesMigration_ConservativeBackfillAndRepeatExecution(
 	adminCodeID := insertHistoricalRedeemCode(t, txCtx, client, adminInvitee.ID, "admin_balance", 25, now)
 	adminLedgerID := insertHistoricalAffiliateLedger(t, txCtx, client, inviter.ID, adminInvitee.ID, 5, now.Add(-time.Minute))
 
-	migrationSQL, err := migrationspkg.FS.ReadFile("231_affiliate_rebate_sources.sql")
+	coreMigrationSQL, err := migrationspkg.FS.ReadFile("231_affiliate_rebate_sources.sql")
 	require.NoError(t, err)
 	for range 2 {
-		_, err = client.ExecContext(txCtx, string(migrationSQL))
+		_, err = client.ExecContext(txCtx, string(coreMigrationSQL))
 		require.NoError(t, err)
 	}
 
@@ -623,12 +836,37 @@ FROM user_affiliate_ledger
 WHERE id = $1`, ordinaryLedgerID)
 	require.NoError(t, err)
 	require.True(t, rows.Next())
-	var ordinarySource string
+	var ordinarySource *string
 	var ordinarySourceID *int64
 	require.NoError(t, rows.Scan(&ordinarySource, &ordinarySourceID))
 	require.NoError(t, rows.Close())
-	require.Equal(t, string(service.AffiliateRebateSourceLegacyUnknown), ordinarySource)
+	require.Nil(t, ordinarySource, "无可靠业务编号的历史余额返利必须保持未分类")
 	require.Nil(t, ordinarySourceID)
+
+	// 模拟早期分支迁移已经按时间窗错误关联了管理员调整记录。
+	oldMigrationAppliedAt := now.Add(time.Minute)
+	_, err = client.ExecContext(txCtx, `
+UPDATE schema_migrations
+SET checksum = $1, applied_at = $2
+WHERE filename = '231_affiliate_rebate_sources.sql'`,
+		"ceb508efbf81877a891a95fe6688cb3287462c2552e1a5c8a8254be9328d6806",
+		oldMigrationAppliedAt,
+	)
+	require.NoError(t, err)
+	_, err = client.ExecContext(txCtx, `
+UPDATE user_affiliate_ledger
+SET source_type = 'admin_recharge',
+    source_redeem_code_id = $1,
+    base_amount = 25
+WHERE id = $2`, adminCodeID, adminLedgerID)
+	require.NoError(t, err)
+
+	constraintMigrationSQL, err := migrationspkg.FS.ReadFile("232_affiliate_rebate_source_constraints.sql")
+	require.NoError(t, err)
+	for range 2 {
+		_, err = client.ExecContext(txCtx, string(constraintMigrationSQL))
+		require.NoError(t, err)
+	}
 
 	rows, err = client.QueryContext(txCtx, `
 SELECT source_type, source_redeem_code_id, base_amount::double precision
@@ -637,16 +875,16 @@ WHERE id = $1`, adminLedgerID)
 	require.NoError(t, err)
 	require.True(t, rows.Next())
 	var adminSource string
-	var adminSourceID int64
-	var adminBaseAmount float64
+	var adminSourceID *int64
+	var adminBaseAmount *float64
 	require.NoError(t, rows.Scan(&adminSource, &adminSourceID, &adminBaseAmount))
 	require.NoError(t, rows.Close())
-	require.Equal(t, string(service.AffiliateRebateSourceAdminRecharge), adminSource)
-	require.Equal(t, adminCodeID, adminSourceID)
-	require.InDelta(t, 25, adminBaseAmount, 1e-9)
+	require.Equal(t, string(service.AffiliateRebateSourceLegacyUnknown), adminSource)
+	require.Nil(t, adminSourceID)
+	require.Nil(t, adminBaseAmount)
 
-	// 普通历史余额码故意不建立来源关系；变量保留用于确认测试数据确实已创建。
 	require.Positive(t, ordinaryCodeID)
+	require.Positive(t, adminCodeID)
 }
 
 func insertHistoricalRedeemCode(t *testing.T, ctx context.Context, client *dbent.Client, userID int64, codeType string, value float64, usedAt time.Time) int64 {

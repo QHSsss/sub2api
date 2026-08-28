@@ -113,6 +113,9 @@ type AffiliateRebateSource struct {
 }
 
 func (s AffiliateRebateSource) ValidateForAccrual() error {
+	if s.BaseAmount <= 0 || math.IsNaN(s.BaseAmount) || math.IsInf(s.BaseAmount, 0) {
+		return ErrAffiliateRebateSource
+	}
 	switch s.Type {
 	case AffiliateRebateSourcePaymentOrder:
 		if s.OrderID == nil || *s.OrderID <= 0 || s.RedeemCodeID != nil {
@@ -123,7 +126,7 @@ func (s AffiliateRebateSource) ValidateForAccrual() error {
 			return ErrAffiliateRebateSource
 		}
 	case AffiliateRebateSourceAdminRecharge:
-		if s.OrderID != nil || (s.RedeemCodeID != nil && *s.RedeemCodeID <= 0) {
+		if s.RedeemCodeID == nil || *s.RedeemCodeID <= 0 || s.OrderID != nil {
 			return ErrAffiliateRebateSource
 		}
 	default:
@@ -370,7 +373,7 @@ func (s *AffiliateService) AccrueInviteRebate(ctx context.Context, inviteeUserID
 	if err := source.ValidateForAccrual(); err != nil {
 		return 0, err
 	}
-	if inviteeUserID <= 0 || source.BaseAmount <= 0 || math.IsNaN(source.BaseAmount) || math.IsInf(source.BaseAmount, 0) {
+	if inviteeUserID <= 0 {
 		return 0, nil
 	}
 	// 总开关关闭时，新充值不再产生返利

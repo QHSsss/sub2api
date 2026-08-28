@@ -73,13 +73,18 @@ func TestAffiliateRebateSourceValidateForAccrual(t *testing.T) {
 		RedeemCodeID: &redeemCodeID,
 	}).ValidateForAccrual())
 	require.NoError(t, (AffiliateRebateSource{
-		Type:       AffiliateRebateSourceAdminRecharge,
-		BaseAmount: 10,
+		Type:         AffiliateRebateSourceAdminRecharge,
+		BaseAmount:   10,
+		RedeemCodeID: &redeemCodeID,
 	}).ValidateForAccrual())
 
 	require.ErrorIs(t, (AffiliateRebateSource{Type: AffiliateRebateSourcePaymentOrder}).ValidateForAccrual(), ErrAffiliateRebateSource)
 	require.ErrorIs(t, (AffiliateRebateSource{Type: AffiliateRebateSourceBalanceRedeem}).ValidateForAccrual(), ErrAffiliateRebateSource)
+	require.ErrorIs(t, (AffiliateRebateSource{Type: AffiliateRebateSourceAdminRecharge}).ValidateForAccrual(), ErrAffiliateRebateSource)
 	require.ErrorIs(t, (AffiliateRebateSource{Type: AffiliateRebateSourceAdminRecharge, RedeemCodeID: new(int64)}).ValidateForAccrual(), ErrAffiliateRebateSource)
+	require.ErrorIs(t, (AffiliateRebateSource{Type: AffiliateRebateSourceBalanceRedeem, RedeemCodeID: &redeemCodeID}).ValidateForAccrual(), ErrAffiliateRebateSource)
+	require.ErrorIs(t, (AffiliateRebateSource{Type: AffiliateRebateSourceBalanceRedeem, BaseAmount: math.NaN(), RedeemCodeID: &redeemCodeID}).ValidateForAccrual(), ErrAffiliateRebateSource)
+	require.ErrorIs(t, (AffiliateRebateSource{Type: AffiliateRebateSourceBalanceRedeem, BaseAmount: math.Inf(1), RedeemCodeID: &redeemCodeID}).ValidateForAccrual(), ErrAffiliateRebateSource)
 	require.ErrorIs(t, (AffiliateRebateSource{Type: AffiliateRebateSourceLegacyUnknown}).ValidateForAccrual(), ErrAffiliateRebateSource)
 }
 

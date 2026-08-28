@@ -50,6 +50,13 @@ LEFT JOIN (
 WHERE ua.user_id = $1
 LIMIT 1`
 
+// 历史支付流水已有订单编号时可以可靠识别；其余未分类旧流水统一展示为历史未知。
+const affiliateRebateEffectiveSourceSQL = `CASE
+    WHEN ual.source_order_id IS NOT NULL THEN 'payment_order'
+    WHEN ual.source_type IS NOT NULL THEN ual.source_type
+    ELSE 'legacy_unknown'
+END`
+
 type affiliateQueryExecer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
@@ -118,9 +125,33 @@ func (r *affiliateRepository) AccrueQuota(ctx context.Context, input service.Aff
 	if input.Amount <= 0 {
 		return 0, nil
 	}
+	if err := input.Source.ValidateForAccrual(); err != nil {
+		return 0, err
+	}
 
 	var appliedAmount float64
 	err := r.withTx(ctx, func(txCtx context.Context, txClient *dbent.Client) error {
+		var sourceValidationSQL string
+		var sourceID int64
+		switch input.Source.Type {
+		case service.AffiliateRebateSourcePaymentOrder:
+			sourceValidationSQL = "SELECT COUNT(*) FROM payment_orders WHERE id = $1 AND user_id = $2"
+			sourceID = *input.Source.OrderID
+		case service.AffiliateRebateSourceBalanceRedeem:
+			sourceValidationSQL = "SELECT COUNT(*) FROM redeem_codes WHERE id = $1 AND used_by = $2 AND status = 'used' AND type = 'balance'"
+			sourceID = *input.Source.RedeemCodeID
+		case service.AffiliateRebateSourceAdminRecharge:
+			sourceValidationSQL = "SELECT COUNT(*) FROM redeem_codes WHERE id = $1 AND used_by = $2 AND status = 'used' AND type = 'admin_balance'"
+			sourceID = *input.Source.RedeemCodeID
+		}
+		sourceCount, err := scanInt64(txCtx, txClient, sourceValidationSQL, sourceID, input.InviteeUserID)
+		if err != nil {
+			return fmt.Errorf("validate affiliate rebate source: %w", err)
+		}
+		if sourceCount != 1 {
+			return service.ErrAffiliateRebateSource
+		}
+
 		// 锁住邀请人的返利账户后再计算单人上限，避免并发充值同时越过上限。
 		lockRows, err := txClient.QueryContext(txCtx, `
 SELECT user_id
@@ -507,7 +538,7 @@ func (r *affiliateRepository) ListAffiliateRebateRecords(ctx context.Context, fi
 	client := clientFromContext(ctx, r.client)
 	where, args := buildAffiliateRecordWhere(filter, "ual.created_at", []string{
 		"inviter.email", "inviter.username", "invitee.email", "invitee.username",
-		"ual.id::text", "COALESCE(ual.source_type, '')", "po.id::text", "po.out_trade_no",
+		"ual.id::text", affiliateRebateEffectiveSourceSQL, "po.id::text", "po.out_trade_no",
 		"po.payment_type", "po.status", "rc.id::text", "rc.code",
 	})
 	baseJoin := `
@@ -522,7 +553,7 @@ WHERE ual.action = 'accrue'`
 	}
 	if sourceType := strings.TrimSpace(filter.SourceType); sourceType != "" && sourceType != string(service.AffiliateRebateSourceFilterAll) {
 		args = append(args, sourceType)
-		where += fmt.Sprintf(" AND COALESCE(ual.source_type, 'legacy_unknown') = $%d", len(args))
+		where += fmt.Sprintf(" AND (%s) = $%d", affiliateRebateEffectiveSourceSQL, len(args))
 	}
 
 	total, err := queryAffiliateRecordCount(ctx, client, "SELECT COUNT(*) "+baseJoin+where, args...)
@@ -531,23 +562,23 @@ WHERE ual.action = 'accrue'`
 	}
 
 	orderBy := buildAffiliateRecordOrderBy(filter, map[string]string{
-		"source":           "ual.source_type",
+		"source":           affiliateRebateEffectiveSourceSQL,
 		"source_reference": "COALESCE(po.id, rc.id)",
 		"order":            "po.id",
 		"inviter":          "inviter.email",
 		"invitee":          "invitee.email",
-		"base_amount":      "ual.base_amount",
+		"base_amount":      "COALESCE(ual.base_amount, po.amount)",
 		"order_amount":     "po.amount",
 		"pay_amount":       "po.pay_amount",
 		"rebate_amount":    "ual.amount",
 		"payment_type":     "po.payment_type",
 		"order_status":     "po.status",
 		"created_at":       "ual.created_at",
-	}, "ual.created_at")
+	}, "ual.created_at") + ", ual.id DESC"
 	args = append(args, filter.PageSize, (filter.Page-1)*filter.PageSize)
 	rows, err := client.QueryContext(ctx, `
-	SELECT ual.id,
-	       COALESCE(ual.source_type, 'legacy_unknown'),
+		SELECT ual.id,
+		       `+affiliateRebateEffectiveSourceSQL+`,
 	       ual.source_order_id,
 	       po.out_trade_no,
 		       ual.source_redeem_code_id,
@@ -563,7 +594,7 @@ WHERE ual.action = 'accrue'`
        ual.source_user_id,
 	       COALESCE(invitee.email, ''),
 	       COALESCE(invitee.username, ''),
-	       ual.base_amount::double precision,
+		       COALESCE(ual.base_amount, po.amount)::double precision,
 	       po.amount::double precision,
        po.pay_amount::double precision,
        ual.amount::double precision,
