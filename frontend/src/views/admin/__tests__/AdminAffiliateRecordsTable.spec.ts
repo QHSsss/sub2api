@@ -129,6 +129,51 @@ describe('管理端邀请返利来源筛选', () => {
     }))
   })
 
+  it('余额兑换码和管理员充值使用统一的成功状态徽标', async () => {
+    const response = rebateResponse(91, 'abcd****1234')
+    response.items.push({
+      ...response.items[0],
+      ledger_id: 92,
+      source_type: 'admin_recharge'
+    })
+    response.total = 2
+    listRebateRecords.mockResolvedValueOnce(response)
+
+    const wrapper = mount(AdminAffiliateRecordsTable, {
+      props: { type: 'rebates' },
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          TablePageLayout: { template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>' },
+          DataTable: DataTableStub,
+          Pagination: true,
+          BaseDialog: true,
+          Icon: true,
+          OrderStatusBadge: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    const successBadgeClasses = [
+      'inline-flex',
+      'rounded-full',
+      'bg-green-100',
+      'text-green-800',
+      'dark:bg-green-900/30',
+      'dark:text-green-400'
+    ]
+    for (const label of [
+      'admin.affiliates.records.sourceStatuses.redeemed',
+      'admin.affiliates.records.sourceStatuses.credited'
+    ]) {
+      const badge = wrapper.findAll('span').find((node) => node.text() === label)
+      expect(badge).toBeDefined()
+      expect(badge!.classes()).toEqual(expect.arrayContaining(successBadgeClasses))
+    }
+  })
+
   it('旧筛选的慢响应不会覆盖新筛选结果', async () => {
     let resolveFirstRequest!: (value: ReturnType<typeof rebateResponse>) => void
     listRebateRecords

@@ -88,7 +88,14 @@
           </template>
           <template #cell-source_status="{ row }">
             <OrderStatusBadge v-if="row.source_type === 'payment_order' && row.order_status" :status="row.order_status" />
-            <span v-else class="text-sm text-gray-700 dark:text-gray-300">{{ sourceStatusLabel(row.source_type) }}</span>
+            <!-- 非订单来源没有 order_status，仅复用支付订单完成态的视觉样式。 -->
+            <span
+              v-else-if="row.source_type === 'balance_redeem_code' || row.source_type === 'admin_recharge'"
+              class="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-400"
+            >
+              {{ sourceStatusLabel(row.source_type) }}
+            </span>
+            <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
           </template>
           <template #cell-total_rebate="{ row }">
             <AmountText :value="row.total_rebate" />
