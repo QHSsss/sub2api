@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
 import AdminAffiliateRecordsTable from '../affiliates/AdminAffiliateRecordsTable.vue'
+import Select from '@/components/common/Select.vue'
 
 const { listInviteRecords, listRebateRecords, listTransferRecords, getUserOverview, showError } = vi.hoisted(() => ({
   listInviteRecords: vi.fn(),
@@ -117,7 +118,9 @@ describe('管理端邀请返利来源筛选', () => {
     }))
     expect(wrapper.text()).toContain('abcd****1234')
 
-    await wrapper.get('[data-test="affiliate-rebate-source-filter"]').setValue('balance_redeem_code')
+    const sourceFilter = wrapper.getComponent(Select)
+    sourceFilter.vm.$emit('update:modelValue', 'balance_redeem_code')
+    sourceFilter.vm.$emit('change', 'balance_redeem_code')
     await flushPromises()
 
     expect(listRebateRecords).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -151,7 +154,9 @@ describe('管理端邀请返利来源筛选', () => {
     })
 
     await vi.waitFor(() => expect(listRebateRecords).toHaveBeenCalledTimes(1))
-    await wrapper.get('[data-test="affiliate-rebate-source-filter"]').setValue('balance_redeem_code')
+    const sourceFilter = wrapper.getComponent(Select)
+    sourceFilter.vm.$emit('update:modelValue', 'balance_redeem_code')
+    sourceFilter.vm.$emit('change', 'balance_redeem_code')
     await flushPromises()
     expect(wrapper.text()).toContain('new****2222')
 

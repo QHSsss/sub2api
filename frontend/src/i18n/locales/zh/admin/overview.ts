@@ -403,7 +403,7 @@ export default {
         endAt: '结束日期',
         sourceFilter: '返利来源',
         source: '来源',
-        sourceReference: '来源凭证',
+        sourceReference: '来源记录',
         baseAmount: '充值金额',
         sourceStatus: '来源状态',
         sourceTypes: {

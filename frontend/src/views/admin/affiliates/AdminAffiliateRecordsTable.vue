@@ -7,20 +7,15 @@
             <Icon name="search" size="md" class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input v-model="filters.search" type="text" class="input pl-10" :placeholder="t(props.type === 'rebates' ? 'admin.affiliates.records.rebateSearchPlaceholder' : 'admin.affiliates.records.searchPlaceholder')" @input="debounceLoad" />
           </div>
-          <select
+          <Select
             v-if="props.type === 'rebates'"
             v-model="filters.source_type"
+            :options="sourceFilterOptions"
             data-test="affiliate-rebate-source-filter"
-            class="input w-full sm:w-44"
-            :title="t('admin.affiliates.records.sourceFilter')"
+            class="w-full sm:w-44"
+            :aria-label="t('admin.affiliates.records.sourceFilter')"
             @change="reloadFromFirstPage"
-          >
-            <option value="all">{{ t('admin.affiliates.records.sourceTypes.all') }}</option>
-            <option value="payment_order">{{ t('admin.affiliates.records.sourceTypes.payment_order') }}</option>
-            <option value="balance_redeem_code">{{ t('admin.affiliates.records.sourceTypes.balance_redeem_code') }}</option>
-            <option value="admin_recharge">{{ t('admin.affiliates.records.sourceTypes.admin_recharge') }}</option>
-            <option value="legacy_unknown">{{ t('admin.affiliates.records.sourceTypes.legacy_unknown') }}</option>
-          </select>
+          />
           <input v-model="filters.start_at" type="date" class="input w-full sm:w-44" :title="t('admin.affiliates.records.startAt')" @change="reloadFromFirstPage" />
           <input v-model="filters.end_at" type="date" class="input w-full sm:w-44" :title="t('admin.affiliates.records.endAt')" @change="reloadFromFirstPage" />
           <button class="btn btn-secondary px-2 md:px-3" :disabled="loading" :title="t('common.refresh')" @click="loadRecords">
@@ -177,6 +172,7 @@ import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import Select from '@/components/common/Select.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OrderStatusBadge from '@/components/payment/OrderStatusBadge.vue'
 import type { Column } from '@/components/common/types'
@@ -198,6 +194,13 @@ const appStore = useAppStore()
 const loading = ref(false)
 const records = ref<AffiliateRecord[]>([])
 const filters = reactive({ search: '', start_at: '', end_at: '', source_type: 'all' as AffiliateRebateSourceFilter })
+const sourceFilterOptions = computed(() => [
+  { value: 'all', label: t('admin.affiliates.records.sourceTypes.all') },
+  { value: 'payment_order', label: t('admin.affiliates.records.sourceTypes.payment_order') },
+  { value: 'balance_redeem_code', label: t('admin.affiliates.records.sourceTypes.balance_redeem_code') },
+  { value: 'admin_recharge', label: t('admin.affiliates.records.sourceTypes.admin_recharge') },
+  { value: 'legacy_unknown', label: t('admin.affiliates.records.sourceTypes.legacy_unknown') },
+])
 const pagination = reactive({ page: 1, page_size: 20, total: 0 })
 const overviewDialog = ref(false)
 const overviewLoading = ref(false)
