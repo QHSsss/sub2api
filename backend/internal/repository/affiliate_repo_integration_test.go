@@ -83,6 +83,53 @@ func querySingleInt(t *testing.T, ctx context.Context, client *dbent.Client, que
 	return value
 }
 
+func registerCommittedAffiliateTestCleanup(t *testing.T, userIDs, redeemCodeIDs *[]int64) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx := context.Background()
+		tx, err := integrationDB.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback() }()
+
+		// 这些用例必须提交真实多事务数据；按已登记主键清理，避免污染同包后续查询。
+		for _, redeemCodeID := range *redeemCodeIDs {
+			_, err = tx.ExecContext(ctx, "DELETE FROM user_affiliate_ledger WHERE source_redeem_code_id = $1", redeemCodeID)
+			require.NoError(t, err)
+		}
+		for _, userID := range *userIDs {
+			_, err = tx.ExecContext(ctx, "DELETE FROM user_affiliate_ledger WHERE user_id = $1 OR source_user_id = $1", userID)
+			require.NoError(t, err)
+			_, err = tx.ExecContext(ctx, "DELETE FROM redeem_codes WHERE used_by = $1", userID)
+			require.NoError(t, err)
+		}
+		for _, redeemCodeID := range *redeemCodeIDs {
+			_, err = tx.ExecContext(ctx, "DELETE FROM redeem_codes WHERE id = $1", redeemCodeID)
+			require.NoError(t, err)
+		}
+		for _, userID := range *userIDs {
+			_, err = tx.ExecContext(ctx, "DELETE FROM user_affiliates WHERE user_id = $1 OR inviter_id = $1", userID)
+			require.NoError(t, err)
+			_, err = tx.ExecContext(ctx, "DELETE FROM users WHERE id = $1", userID)
+			require.NoError(t, err)
+		}
+		require.NoError(t, tx.Commit())
+	})
+}
+
+func registerIntegrationSettingRestore(t *testing.T, ctx context.Context, settingRepo service.SettingRepository, keys []string) {
+	t.Helper()
+	previousSettings, err := settingRepo.GetMultiple(ctx, keys)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, settingRepo.SetMultiple(ctx, previousSettings))
+		for _, key := range keys {
+			if _, existed := previousSettings[key]; !existed {
+				require.NoError(t, settingRepo.Delete(ctx, key))
+			}
+		}
+	})
+}
+
 func TestAffiliateRepository_TransferQuotaToBalance_UsesClaimedQuotaBeforeClear(t *testing.T) {
 	ctx := context.Background()
 	tx := testEntTx(t)
@@ -358,6 +405,8 @@ RETURNING id`, shortRedeemCode, invitee.ID)
 func TestAffiliateRepository_AccrueQuota_ConcurrentSameRedeemSourceIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	repo := NewAffiliateRepository(integrationEntClient, integrationDB)
+	var userIDs, redeemCodeIDs []int64
+	registerCommittedAffiliateTestCleanup(t, &userIDs, &redeemCodeIDs)
 
 	inviter := mustCreateUser(t, integrationEntClient, &service.User{
 		Email:        fmt.Sprintf("affiliate-source-race-inviter-%d@example.com", time.Now().UnixNano()),
@@ -365,12 +414,14 @@ func TestAffiliateRepository_AccrueQuota_ConcurrentSameRedeemSourceIsIdempotent(
 		Role:         service.RoleUser,
 		Status:       service.StatusActive,
 	})
+	userIDs = append(userIDs, inviter.ID)
 	invitee := mustCreateUser(t, integrationEntClient, &service.User{
 		Email:        fmt.Sprintf("affiliate-source-race-invitee-%d@example.com", time.Now().UnixNano()+1),
 		PasswordHash: "hash",
 		Role:         service.RoleUser,
 		Status:       service.StatusActive,
 	})
+	userIDs = append(userIDs, invitee.ID)
 	_, err := repo.EnsureUserAffiliate(ctx, inviter.ID)
 	require.NoError(t, err)
 	_, err = repo.EnsureUserAffiliate(ctx, invitee.ID)
@@ -385,6 +436,7 @@ RETURNING id`, fmt.Sprintf("RACE%d", time.Now().UnixNano()), invitee.ID)
 	var redeemCodeID int64
 	require.NoError(t, rows.Scan(&redeemCodeID))
 	require.NoError(t, rows.Close())
+	redeemCodeIDs = append(redeemCodeIDs, redeemCodeID)
 
 	start := make(chan struct{})
 	results := make(chan struct {
@@ -487,6 +539,8 @@ func TestAffiliateRepository_AccrueQuota_TruncatesAtPerInviteeCap(t *testing.T) 
 func TestAffiliateRepository_AccrueQuota_ConcurrentRequestsRespectPerInviteeCap(t *testing.T) {
 	ctx := context.Background()
 	repo := NewAffiliateRepository(integrationEntClient, integrationDB)
+	var userIDs, redeemCodeIDs []int64
+	registerCommittedAffiliateTestCleanup(t, &userIDs, &redeemCodeIDs)
 
 	inviter := mustCreateUser(t, integrationEntClient, &service.User{
 		Email:        fmt.Sprintf("affiliate-concurrent-cap-inviter-%d@example.com", time.Now().UnixNano()),
@@ -494,12 +548,14 @@ func TestAffiliateRepository_AccrueQuota_ConcurrentRequestsRespectPerInviteeCap(
 		Role:         service.RoleUser,
 		Status:       service.StatusActive,
 	})
+	userIDs = append(userIDs, inviter.ID)
 	invitee := mustCreateUser(t, integrationEntClient, &service.User{
 		Email:        fmt.Sprintf("affiliate-concurrent-cap-invitee-%d@example.com", time.Now().UnixNano()+1),
 		PasswordHash: "hash",
 		Role:         service.RoleUser,
 		Status:       service.StatusActive,
 	})
+	userIDs = append(userIDs, invitee.ID)
 	_, err := repo.EnsureUserAffiliate(ctx, inviter.ID)
 	require.NoError(t, err)
 	_, err = repo.EnsureUserAffiliate(ctx, invitee.ID)
@@ -508,6 +564,7 @@ func TestAffiliateRepository_AccrueQuota_ConcurrentRequestsRespectPerInviteeCap(
 		insertHistoricalRedeemCode(t, ctx, integrationEntClient, invitee.ID, "admin_balance", 20, time.Now()),
 		insertHistoricalRedeemCode(t, ctx, integrationEntClient, invitee.ID, "admin_balance", 20, time.Now()),
 	}
+	redeemCodeIDs = append(redeemCodeIDs, adminCodeIDs...)
 
 	type result struct {
 		amount float64
@@ -558,10 +615,20 @@ func TestAdminService_UpdateUserBalance_AdminRechargeCommitsOrRollsBackAsOneTran
 	redeemRepo := NewRedeemCodeRepository(integrationEntClient)
 	affiliateRepo := NewAffiliateRepository(integrationEntClient, integrationDB)
 	settingRepo := NewSettingRepository(integrationEntClient)
-	require.NoError(t, settingRepo.Set(ctx, service.SettingKeyAffiliateEnabled, "true"))
-	require.NoError(t, settingRepo.Set(ctx, service.SettingKeyAffiliateAdminRechargeEnabled, "true"))
-	require.NoError(t, settingRepo.Set(ctx, service.SettingKeyAffiliateRebateRate, "20"))
+	settingKeys := []string{
+		service.SettingKeyAffiliateEnabled,
+		service.SettingKeyAffiliateAdminRechargeEnabled,
+		service.SettingKeyAffiliateRebateRate,
+	}
+	registerIntegrationSettingRestore(t, ctx, settingRepo, settingKeys)
+	require.NoError(t, settingRepo.SetMultiple(ctx, map[string]string{
+		service.SettingKeyAffiliateEnabled:              "true",
+		service.SettingKeyAffiliateAdminRechargeEnabled: "true",
+		service.SettingKeyAffiliateRebateRate:           "20",
+	}))
 	settingService := service.NewSettingService(settingRepo, nil)
+	var userIDs, redeemCodeIDs []int64
+	registerCommittedAffiliateTestCleanup(t, &userIDs, &redeemCodeIDs)
 
 	inviter := mustCreateUser(t, integrationEntClient, &service.User{
 		Email:        fmt.Sprintf("admin-recharge-rollback-inviter-%d@example.com", time.Now().UnixNano()),
@@ -569,6 +636,7 @@ func TestAdminService_UpdateUserBalance_AdminRechargeCommitsOrRollsBackAsOneTran
 		Role:         service.RoleUser,
 		Status:       service.StatusActive,
 	})
+	userIDs = append(userIDs, inviter.ID)
 	invitee := mustCreateUser(t, integrationEntClient, &service.User{
 		Email:        fmt.Sprintf("admin-recharge-rollback-invitee-%d@example.com", time.Now().UnixNano()+1),
 		PasswordHash: "hash",
@@ -576,6 +644,7 @@ func TestAdminService_UpdateUserBalance_AdminRechargeCommitsOrRollsBackAsOneTran
 		Status:       service.StatusActive,
 		Balance:      10,
 	})
+	userIDs = append(userIDs, invitee.ID)
 	_, err := affiliateRepo.EnsureUserAffiliate(ctx, inviter.ID)
 	require.NoError(t, err)
 	_, err = affiliateRepo.EnsureUserAffiliate(ctx, invitee.ID)
@@ -607,6 +676,7 @@ WHERE rc.used_by = $1 AND rc.type = 'admin_balance'`, invitee.ID)
 	var baseAmount, rebateAmount float64
 	require.NoError(t, rows.Scan(&adjustmentRecordID, &sourceType, &baseAmount, &rebateAmount))
 	require.NoError(t, rows.Close())
+	redeemCodeIDs = append(redeemCodeIDs, adjustmentRecordID)
 	require.Positive(t, adjustmentRecordID)
 	require.Equal(t, string(service.AffiliateRebateSourceAdminRecharge), sourceType)
 	require.InDelta(t, 5, baseAmount, 1e-9)
@@ -649,17 +719,7 @@ func TestRedeemService_BalanceAndAffiliateRebateShareTransaction(t *testing.T) {
 		service.SettingKeyAffiliateRebateDurationDays,
 		service.SettingKeyAffiliateRebatePerInviteeCap,
 	}
-	previousSettings, err := settingRepo.GetMultiple(ctx, settingKeys)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		for _, key := range settingKeys {
-			if value, ok := previousSettings[key]; ok {
-				require.NoError(t, settingRepo.Set(ctx, key, value))
-				continue
-			}
-			require.NoError(t, settingRepo.Delete(ctx, key))
-		}
-	})
+	registerIntegrationSettingRestore(t, ctx, settingRepo, settingKeys)
 	require.NoError(t, settingRepo.SetMultiple(ctx, map[string]string{
 		service.SettingKeyAffiliateEnabled:             "true",
 		service.SettingKeyAffiliateRebateRate:          "20",
@@ -668,6 +728,8 @@ func TestRedeemService_BalanceAndAffiliateRebateShareTransaction(t *testing.T) {
 		service.SettingKeyAffiliateRebatePerInviteeCap: "0",
 	}))
 	settingService := service.NewSettingService(settingRepo, nil)
+	var userIDs, redeemCodeIDs []int64
+	registerCommittedAffiliateTestCleanup(t, &userIDs, &redeemCodeIDs)
 
 	inviter := mustCreateUser(t, integrationEntClient, &service.User{
 		Email:        fmt.Sprintf("redeem-transaction-inviter-%d@example.com", time.Now().UnixNano()),
@@ -675,6 +737,7 @@ func TestRedeemService_BalanceAndAffiliateRebateShareTransaction(t *testing.T) {
 		Role:         service.RoleUser,
 		Status:       service.StatusActive,
 	})
+	userIDs = append(userIDs, inviter.ID)
 	invitee := mustCreateUser(t, integrationEntClient, &service.User{
 		Email:        fmt.Sprintf("redeem-transaction-invitee-%d@example.com", time.Now().UnixNano()+1),
 		PasswordHash: "hash",
@@ -682,7 +745,8 @@ func TestRedeemService_BalanceAndAffiliateRebateShareTransaction(t *testing.T) {
 		Status:       service.StatusActive,
 		Balance:      10,
 	})
-	_, err = affiliateRepo.EnsureUserAffiliate(ctx, inviter.ID)
+	userIDs = append(userIDs, invitee.ID)
+	_, err := affiliateRepo.EnsureUserAffiliate(ctx, inviter.ID)
 	require.NoError(t, err)
 	_, err = affiliateRepo.EnsureUserAffiliate(ctx, invitee.ID)
 	require.NoError(t, err)
@@ -701,6 +765,7 @@ func TestRedeemService_BalanceAndAffiliateRebateShareTransaction(t *testing.T) {
 		}
 		require.NoError(t, redeemRepo.Create(ctx, code))
 		require.Positive(t, code.ID)
+		redeemCodeIDs = append(redeemCodeIDs, code.ID)
 		return code
 	}
 	ledgerCountForCode := func(codeID int64) int {
