@@ -21,6 +21,15 @@
           <button class="btn btn-secondary px-2 md:px-3" :disabled="loading" :title="t('common.refresh')" @click="loadRecords">
             <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
           </button>
+          <button
+            v-if="props.type === 'transfers'"
+            type="button"
+            class="btn btn-primary ml-auto"
+            data-test="affiliate-withdraw-open"
+            @click="withdrawDialog = true"
+          >
+            {{ t('admin.affiliates.withdraw.button') }}
+          </button>
         </div>
       </template>
 
@@ -45,7 +54,9 @@
             />
           </template>
           <template #cell-invitee="{ row }">
+            <span v-if="row.invitee_id == null" class="text-sm text-gray-400 dark:text-dark-500">-</span>
             <UserCell
+              v-else
               :id="row.invitee_id"
               :email="row.invitee_email"
               :username="row.invitee_username"
@@ -84,7 +95,8 @@
             </div>
           </template>
           <template #cell-payment_type="{ row }">
-            {{ row.payment_type ? t('payment.methods.' + row.payment_type, row.payment_type) : '-' }}
+            <template v-if="row.payment_type">{{ t('payment.methods.' + row.payment_type, row.payment_type) }}</template>
+            <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
           </template>
           <template #cell-source_status="{ row }">
             <OrderStatusBadge v-if="row.source_type === 'payment_order' && row.order_status" :status="row.order_status" />
@@ -104,11 +116,16 @@
             <NullableAmountText :value="row.base_amount" />
           </template>
           <template #cell-pay_amount="{ row }">
-            <span v-if="row.pay_amount !== null && row.pay_amount !== undefined" class="text-sm text-gray-900 dark:text-white">¥{{ formatAmount(row.pay_amount) }}</span>
-            <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
+            <span v-if="row.pay_amount == null" class="text-sm text-gray-400 dark:text-dark-500">-</span>
+            <span v-else class="text-sm text-gray-900 dark:text-white">¥{{ formatAmount(row.pay_amount) }}</span>
           </template>
           <template #cell-rebate_amount="{ row }">
             <AmountText :value="row.rebate_amount" strong />
+          </template>
+          <template #cell-action="{ row }">
+            <span :class="['badge whitespace-nowrap', row.action === 'withdraw' ? 'badge-warning' : 'badge-primary']">
+              {{ outflowTypeLabel(row.action) }}
+            </span>
           </template>
           <template #cell-amount="{ row }">
             <AmountText :value="row.amount" strong />
@@ -142,6 +159,13 @@
         />
       </template>
     </TablePageLayout>
+
+    <AffiliateOfflineWithdrawDialog
+      v-if="props.type === 'transfers'"
+      :show="withdrawDialog"
+      @close="withdrawDialog = false"
+      @success="handleWithdrawSuccess"
+    />
 
     <BaseDialog
       :show="overviewDialog"
@@ -182,6 +206,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import Select from '@/components/common/Select.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OrderStatusBadge from '@/components/payment/OrderStatusBadge.vue'
+import AffiliateOfflineWithdrawDialog from './AffiliateOfflineWithdrawDialog.vue'
 import type { Column } from '@/components/common/types'
 import { useAppStore } from '@/stores/app'
 import { affiliatesAPI, type AffiliateInviteRecord, type AffiliateRebateRecord, type AffiliateRebateSourceFilter, type AffiliateRebateSourceType, type AffiliateTransferRecord, type AffiliateUserOverview, type ListAffiliateRecordsParams } from '@/api/admin/affiliates'
@@ -212,6 +237,7 @@ const pagination = reactive({ page: 1, page_size: 20, total: 0 })
 const overviewDialog = ref(false)
 const overviewLoading = ref(false)
 const selectedOverview = ref<AffiliateUserOverview | null>(null)
+const withdrawDialog = ref(false)
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let recordsRequestSequence = 0
 
@@ -241,6 +267,7 @@ const columns = computed<Column[]>(() => {
   }
   return [
     { key: 'user', label: t('admin.affiliates.records.user'), sortable: true },
+    { key: 'action', label: t('admin.affiliates.records.outflowType'), sortable: true },
     { key: 'amount', label: t('admin.affiliates.records.transferAmount'), sortable: true },
     { key: 'balance_after', label: t('admin.affiliates.records.balanceAfter'), sortable: true },
     { key: 'available_quota_after', label: t('admin.affiliates.records.availableQuotaAfter'), sortable: true },
@@ -345,6 +372,17 @@ function handleSort(key: string, order: 'asc' | 'desc') {
   sortState.sort_order = order
   pagination.page = 1
   void loadRecords()
+}
+
+function handleWithdrawSuccess() {
+  withdrawDialog.value = false
+  reloadFromFirstPage()
+}
+
+function outflowTypeLabel(action: string | null | undefined): string {
+  return action === 'withdraw'
+    ? t('admin.affiliates.outflowTypes.withdraw')
+    : t('admin.affiliates.outflowTypes.transfer')
 }
 
 function formatAmount(value: number | null | undefined): string {

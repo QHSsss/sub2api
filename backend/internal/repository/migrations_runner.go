@@ -66,6 +66,8 @@ const affiliateRebateSourceIndexesMigration = "231_affiliate_rebate_sources_inde
 const affiliateRebateSourceTypeCreatedAtIndex = "idx_user_affiliate_ledger_source_type_created_at"
 const affiliateRebateAccrueOrderUniqueIndex = "idx_user_affiliate_ledger_accrue_order_uniq"
 const affiliateRebateAccrueRedeemCodeUniqueIndex = "idx_user_affiliate_ledger_accrue_redeem_code_uniq"
+const usageLogsUpstreamRequestIDIndexMigration = "233_add_usage_log_upstream_request_id_index_notx.sql"
+const usageLogsUpstreamRequestIDIndex = "idx_usage_logs_upstream_request_id"
 
 type migrationChecksumCompatibilityRule struct {
 	fileChecksum       string
@@ -313,6 +315,8 @@ func prepareNonTransactionalMigration(ctx context.Context, db migrationConnectio
 		return nil
 	case affiliateRebateSourceIndexesMigration:
 		return prepareAffiliateRebateSourceIndexesMigration(ctx, db)
+	case usageLogsUpstreamRequestIDIndexMigration:
+		return dropInvalidIndexIfPresent(ctx, db, usageLogsUpstreamRequestIDIndex)
 	default:
 		return nil
 	}
